@@ -207,65 +207,170 @@ def add_region_features(X, feature_names):
     
     return region_features, region_names
 
-def compare_classifiers(X, y, cv_splits=5, random_state=42):
+def compare_classifiers(X, y, cv_splits=5, random_state=42, tune_hyperparameters=True):
     """
-    Compare classifiers 
+    Compare classifiers with optional hyperparameter optimization.
+    
+    Parameters:
+    -----------
+    X : array-like
+        Feature matrix
+    y : array-like
+        Target labels
+    cv_splits : int
+        Number of cross-validation splits
+    random_state : int
+        Random seed for reproducibility
+    tune_hyperparameters : bool
+        If True, perform GridSearchCV for hyperparameter optimization.
+        If False, use default hyperparameters (original behavior).
+    
+    Returns:
+    --------
+    results : dict
+        Dictionary with classifier performance metrics
+    le : LabelEncoder
+        Fitted label encoder
+    best_params : dict (only if tune_hyperparameters=True)
+        Best hyperparameters found for each classifier
     """
     le = LabelEncoder()
     y_enc = le.fit_transform(y)
     
-    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+    # Outer CV for model evaluation
+    outer_cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+    # Inner CV for hyperparameter tuning
+    inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state)
+    
     n_features = min(20, X.shape[1])
     
-    classifiers = {
+    # Define base pipelines
+    pipelines = {
         'Random Forest': Pipeline([
             ('selector', SelectKBest(f_classif, k=n_features)),
-            ('clf', RandomForestClassifier(
-                n_estimators=100, max_depth=3, min_samples_leaf=3,
-                class_weight='balanced', random_state=random_state
-            ))
+            ('clf', RandomForestClassifier(class_weight='balanced', random_state=random_state))
         ]),
         'Gradient Boosting': Pipeline([
             ('selector', SelectKBest(f_classif, k=n_features)),
-            ('clf', GradientBoostingClassifier(
-                n_estimators=50, max_depth=2, min_samples_leaf=3,
-                learning_rate=0.1, random_state=random_state
-            ))
+            ('clf', GradientBoostingClassifier(random_state=random_state))
         ]),
         'Logistic Regression': Pipeline([
             ('selector', SelectKBest(f_classif, k=n_features)),
-            ('clf', LogisticRegression(
-                C=0.1, penalty='l2', class_weight='balanced',
-                max_iter=1000, random_state=random_state
-            ))
+            ('clf', LogisticRegression(class_weight='balanced', max_iter=1000, random_state=random_state))
         ]),
         'SVM (RBF)': Pipeline([
             ('selector', SelectKBest(f_classif, k=n_features)),
-            ('clf', SVC(
-                C=1.0, kernel='rbf', class_weight='balanced',
-                random_state=random_state
-            ))
+            ('clf', SVC(kernel='rbf', class_weight='balanced', random_state=random_state))
         ]),
         'SVM (Linear)': Pipeline([
             ('selector', SelectKBest(f_classif, k=n_features)),
-            ('clf', SVC(
-                C=1.0, kernel='linear', class_weight='balanced',
-                random_state=random_state
-            ))
+            ('clf', SVC(kernel='linear', class_weight='balanced', random_state=random_state))
         ])
     }
-    results = {}
-    print("Classifier Comparison (Stratified 5-Fold CV)")
     
-    for name, pipe in classifiers.items():
-        scores = cross_val_score(pipe, X, y_enc, cv=cv, scoring='balanced_accuracy')
-        results[name] = {'mean': scores.mean(), 'std': scores.std(), 'scores': scores}
-        print(f"{name:25s}: {scores.mean():.3f} (+/- {scores.std():.3f})")
+    # Define hyperparameter grids for each classifier
+    param_grids = {
+        'Random Forest': {
+            'selector__k': [10, 15, 20],
+            'clf__n_estimators': [50, 100, 200],
+            'clf__max_depth': [2, 3, 4, 5],
+            'clf__min_samples_leaf': [2, 3, 5]
+        },
+        'Gradient Boosting': {
+            'selector__k': [10, 15, 20],
+            'clf__n_estimators': [50, 100, 150],
+            'clf__max_depth': [2, 3, 4],
+            'clf__learning_rate': [0.05, 0.1, 0.2],
+            'clf__min_samples_leaf': [2, 3, 5]
+        },
+        'Logistic Regression': {
+            'selector__k': [10, 15, 20],
+            'clf__C': [0.01, 0.1, 1.0, 10.0],
+            'clf__penalty': ['l2']
+        },
+        'SVM (RBF)': {
+            'selector__k': [10, 15, 20],
+            'clf__C': [0.1, 1.0, 10.0],
+            'clf__gamma': ['scale', 'auto', 0.01, 0.1]
+        },
+        'SVM (Linear)': {
+            'selector__k': [10, 15, 20],
+            'clf__C': [0.01, 0.1, 1.0, 10.0]
+        }
+    }
+    
+    results = {}
+    best_params = {}
+    
+    if tune_hyperparameters:
+        print("="*70)
+        print("Classifier Comparison with Hyperparameter Optimization")
+        print("(Nested CV: outer=5-fold, inner=3-fold GridSearchCV)")
+        print("="*70)
+        
+        for name, pipe in pipelines.items():
+            print(f"\n{name}:")
+            print(f"  Tuning hyperparameters...")
+            
+            # Nested CV: GridSearchCV inside cross_val_score
+            grid_search = GridSearchCV(
+                pipe, 
+                param_grids[name], 
+                cv=inner_cv, 
+                scoring='balanced_accuracy',
+                n_jobs=-1,
+                refit=True
+            )
+            
+            # Outer CV scores (unbiased performance estimate)
+            outer_scores = cross_val_score(
+                grid_search, X, y_enc, 
+                cv=outer_cv, 
+                scoring='balanced_accuracy'
+            )
+            
+            # Fit on full data to get best params
+            grid_search.fit(X, y_enc)
+            best_params[name] = grid_search.best_params_
+            
+            results[name] = {
+                'mean': outer_scores.mean(), 
+                'std': outer_scores.std(), 
+                'scores': outer_scores,
+                'best_params': grid_search.best_params_,
+                'best_cv_score': grid_search.best_score_
+            }
+            
+            print(f"  Best params: {grid_search.best_params_}")
+            print(f"  Inner CV score: {grid_search.best_score_:.3f}")
+            print(f"  Outer CV score: {outer_scores.mean():.3f} (+/- {outer_scores.std():.3f})")
+    
+    else:
+        # Original behavior with fixed hyperparameters
+        print("Classifier Comparison (Stratified 5-Fold CV)")
+        
+        # Set default parameters
+        default_params = {
+            'Random Forest': {'clf__n_estimators': 100, 'clf__max_depth': 3, 'clf__min_samples_leaf': 3},
+            'Gradient Boosting': {'clf__n_estimators': 50, 'clf__max_depth': 2, 'clf__min_samples_leaf': 3, 'clf__learning_rate': 0.1},
+            'Logistic Regression': {'clf__C': 0.1, 'clf__penalty': 'l2'},
+            'SVM (RBF)': {'clf__C': 1.0},
+            'SVM (Linear)': {'clf__C': 1.0}
+        }
+        
+        for name, pipe in pipelines.items():
+            pipe.set_params(**default_params[name])
+            scores = cross_val_score(pipe, X, y_enc, cv=outer_cv, scoring='balanced_accuracy')
+            results[name] = {'mean': scores.mean(), 'std': scores.std(), 'scores': scores}
+            print(f"{name:25s}: {scores.mean():.3f} (+/- {scores.std():.3f})")
     
     best = max(results.items(), key=lambda x: x[1]['mean'])
-    print("="*60)
+    print("\n" + "="*70)
     print(f"Best: {best[0]} ({best[1]['mean']:.3f})")
+    print("="*70)
     
+    if tune_hyperparameters:
+        return results, le, best_params
     return results, le
 
 def leave_one_out_evaluation(X, y, sample_names, n_features=15):
@@ -503,73 +608,72 @@ def analyze_feature_importance(X_scaled, y, feature_names, top_n_select=50, top_
 RECEPTOR_CONFIG = {
     # Gs-coupled receptors (23)
     'Gs': [
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/5HT4R_7XT8_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/5HT7R_7XTC_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/AA2AR_5G53_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/ADRB3_9IJE_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/CNR1_8K8J_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/EDNRA_8XVI_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/EDNRB_8XVH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/FFAR4_8H4I_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP119_7WCM_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP139_7VUH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP174_8KH5_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPBAR_9GYO_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR3_8WW2_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR6_8TYW_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR12_7Y3G_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR52_8HMP_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/NK1R_8U26_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/PE2R2_7CX2_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/PE2R4_8GDB_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/RXFP1_7TMW_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/SUCR1_8JPP_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/TAAR1_8W89_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/V2R_7DW9_DONE", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gs/5HT7R_7XTC_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/AA2AR_5G53_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/ADRB3_9IJE_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/CNR1_8K8J_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/EDNRA_8XVI_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/EDNRB_8XVH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/FFAR4_8H4I_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP119_7WCM_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP139_7VUH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP174_8KH5_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPBAR_9GYO_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR3_8WW2_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR6_8TYW_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR12_7Y3G_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR52_8HMP_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/NK1R_8U26_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/PE2R2_7CX2_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/PE2R4_8GDB_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/RXFP1_7TMW_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/SUCR1_8JPP_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/TAAR1_8W89_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/V2R_7DW9_DONE", "nmi_df.csv", "genetic_mapping.json")
     ],
     
     'Gi': [
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/AA1R_7LD4_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/AA3R_8X17_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/ADA2A_9CBL_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/CCR6_6WWZ_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/CNR1_9ERX_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/EDNRB_8IY5_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/FFAR1_9K1C_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/FFAR2_9K1D_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/MCHR1_8WWK_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/OPRK_8F7W_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/OPRM_8F7Q_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PE2R4_8GCP_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PTAFR_8XYD_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/5HT4R_7XTA_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/NMUR2_7XK8_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/NTR1_6OS9_PREAPRED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/P2Y12_7XXI_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PE2R3_8GDC_PREPARED", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gi/AA1R_7LD4_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/AA3R_8X17_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/ADA2A_9CBL_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/CCR6_6WWZ_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/CNR1_9ERX_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/EDNRB_8IY5_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/FFAR1_9K1C_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/FFAR2_9K1D_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/MCHR1_8WWK_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/OPRK_8F7W_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/OPRM_8F7Q_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PE2R4_8GCP_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PTAFR_8XYD_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/5HT4R_7XTA_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/NMUR2_7XK8_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/NTR1_6OS9_PREAPRED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/P2Y12_7XXI_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PE2R3_8GDC_PREPARED", "nmi_df.csv", "genetic_mapping.json")
     ],
     
     'Gq': [
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/5HT2A_8UWL_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/5HT2B_7SRR_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/ADA1A_8THL_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/BKRB2_7F6I_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/EDNRA_8HCQ_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/EDNRB_8HCX_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/FFAR4_8G59_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/HRH2_8YN4_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/KISSR_8XGS_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MCHR2_8WST_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MRGX1_8JGF_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MRGX2_7S8L_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MTLR_8IBV_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/NMUR1_7W56_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/NMUR2_7W55_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/P2RY1_7XXH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PAR1_8XOR_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PF2R_8IUK_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PRLHR_8ZPT_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/SSR2_7Y27_DONE", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gq/5HT2A_8UWL_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/5HT2B_7SRR_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/ADA1A_8THL_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/BKRB2_7F6I_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/EDNRA_8HCQ_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/EDNRB_8HCX_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/FFAR4_8G59_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/HRH2_8YN4_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/KISSR_8XGS_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MCHR2_8WST_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MRGX1_8JGF_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MRGX2_7S8L_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MTLR_8IBV_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/NMUR1_7W56_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/NMUR2_7W55_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/P2RY1_7XXH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PAR1_8XOR_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PF2R_8IUK_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PRLHR_8ZPT_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/SSR2_7Y27_DONE", "nmi_df.csv", "genetic_mapping.json")
     ]
 }
 
@@ -620,8 +724,17 @@ X_scaled = scaler.fit_transform(X_filtered)
 
 print(f"\nFinal feature matrix: {X_scaled.shape}")
 
-# Compare classifiers on pre-processed data
-clf_results, le = compare_classifiers(X_scaled, y)
+# Compare classifiers on pre-processed data (with hyperparameter optimization)
+clf_results, le, best_params = compare_classifiers(X_scaled, y, tune_hyperparameters=True)
+
+# Print summary of best parameters
+print("\n" + "="*70)
+print("BEST HYPERPARAMETERS SUMMARY")
+print("="*70)
+for clf_name, params in best_params.items():
+    print(f"\n{clf_name}:")
+    for param, value in params.items():
+        print(f"  {param}: {value}")
 
 #Make some figures for SI
 fig, ax = plt.subplots(figsize=(10, 6))
