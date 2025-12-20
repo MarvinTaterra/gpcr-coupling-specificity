@@ -145,28 +145,6 @@ def plot_unsupervised_clustering(
     random_state=42,
     figsize=(16, 12)
 ):
-    """
-    Create PCA, t-SNE, K-Means, and hierarchical clustering figures.
-
-    Parameters
-    ----------
-    X_scaled : array-like, shape (n_samples, n_features)
-        Scaled feature matrix.
-    y : array-like, shape (n_samples,)
-        True class labels.
-    sample_names : list of str
-        Sample identifiers for dendrogram labeling.
-    colors_true : dict, optional
-        Mapping of class labels to colors.
-    n_clusters : int, default=3
-        Number of clusters for K-Means.
-    save_path : str, default='unsupervised_clustering.png'
-        Path to save the figure.
-    random_state : int, default=42
-        Random seed for reproducibility.
-    figsize : tuple, default=(16, 12)
-        Figure size.
-    """
 
     if colors_true is None:
         colors_true = {
