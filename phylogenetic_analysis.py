@@ -519,7 +519,7 @@ known_families = {
     'Serotonin receptor': ['5HT2A', '5HT2B', '5HT4R', '5HT7R'],
     'Neuromedin U receptor': ['NMUR1', 'NMUR2'],
     'Free fatty acid receptor': ['FFAR1', 'FFAR2', 'FFAR4'],
-    'Melanin-concentrating hormone receptor': ['MCHR1', 'MCHR2'],
+    'MCH receptor': ['MCHR1', 'MCHR2'],
     'Prostaglandin receptor': ['PE2R2', 'PE2R3', 'PE2R4', 'PF2R'],
 }
 
