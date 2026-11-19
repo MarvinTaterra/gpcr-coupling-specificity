@@ -4,36 +4,25 @@ import json
 import re
 from pathlib import Path
 from collections import defaultdict
+from itertools import combinations
 import warnings
 warnings.filterwarnings('ignore')
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
-from sklearn.decomposition import PCA
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import spearmanr, pearsonr, mannwhitneyu
+from scipy.stats import spearmanr, pearsonr, mannwhitneyu, false_discovery_control, gaussian_kde
 from scipy.cluster.hierarchy import dendrogram, linkage
-from Bio import Phylo, AlignIO, SeqIO, pairwise2
-from Bio.Align import MultipleSeqAlignment, substitution_matrices
-from Bio.SeqRecord import SeqRecord
-from Bio.Seq import Seq
-from Bio.Phylo.TreeConstruction import DistanceCalculator, DistanceTreeConstructor, DistanceMatrix
-from Bio import Entrez
+from Bio import Phylo, pairwise2
+from Bio.Phylo.TreeConstruction import DistanceTreeConstructor, DistanceMatrix
 import requests
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.patches as mpatches
-from scipy.stats import gaussian_kde
-from matplotlib.patches import Rectangle
-from matplotlib.colors import LinearSegmentedColormap
-
 
 def fetch_uniprot_sequence(uniprot_id, retries=3):
-    """
-    Fetch protein sequence from UniProt REST API.
-    Returns sequence string or None if failed.
-    """
+    """Fetch a sequence from the UniProt REST API."""
     url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.fasta"
-    
+
     for attempt in range(retries):
         try:
             response = requests.get(url, timeout=10)
@@ -52,50 +41,44 @@ def fetch_uniprot_sequence(uniprot_id, retries=3):
             else:
                 print(f"  ✗ {uniprot_id}: Failed after {retries} attempts - {e}")
                 return None
-    
+
     return None
 
 def calculate_sequence_identity(seq1, seq2):
-    """
-    Calculate sequence identity between two sequences using pairwise alignment.
-    Returns identity score (0-1).
-    """
-    # Use BLOSUM62 matrix for protein alignment
+    """Sequence identity (0-1) from a global pairwise alignment."""
     alignments = pairwise2.align.globalxx(seq1, seq2)
-    
+
     if not alignments:
         return 0.0
-    
+
     # Get best alignment
     best_alignment = alignments[0]
     aligned_seq1, aligned_seq2 = best_alignment[0], best_alignment[1]
-    
+
     # Calculate identity
     matches = sum(a == b for a, b in zip(aligned_seq1, aligned_seq2) if a != '-' and b != '-')
     total = len([a for a in aligned_seq1 if a != '-'])
-    
+
     if total == 0:
         return 0.0
-    
+
     return matches / total
 
 def calculate_patristic_distance(tree, name1, name2):
-    """
-    Calculate patristic distance (sum of branch lengths) between two taxa.
-    """
+    """Calculate patristic distance (sum of branch lengths) between two taxa."""
     # Find the two terminal nodes
     node1 = None
     node2 = None
-    
+
     for terminal in tree.get_terminals():
         if terminal.name == name1:
             node1 = terminal
         if terminal.name == name2:
             node2 = terminal
-    
+
     if node1 is None or node2 is None:
         return None
-    
+
     # Calculate distance
     return tree.distance(node1, node2)
 
@@ -129,7 +112,7 @@ def map_to_bw_pairs(nmi_df, genetic_dict):
             break
     if nmi_col is None:
         return bw_pairs
-    
+
     for _, row in nmi_df.iterrows():
         try:
             res1, res2 = parse_residue_pair(row['Residue Pair'])
@@ -159,142 +142,141 @@ UNIPROT_IDS = {
     'ADA2A': 'P08913',
     'ADRB3': 'P13945',
     'HRH2': 'P25021',
-    
+
     # Adenosine receptors
     'AA1R': 'P30542',
     'AA2AR': 'P29274',
     'AA3R': 'P0DMS8',
-    
+
     # Opioid receptors
     'OPRK': 'P41145',
     'OPRM': 'P35372',
-    
+
     # Endothelin receptors
     'EDNRA': 'P25101',
     'EDNRB': 'P24530',
-    
+
     # Cannabinoid
     'CNR1': 'P21554',
-    
+
     # Free fatty acid receptors
     'FFAR1': 'O14842',
     'FFAR2': 'O15552',
     'FFAR4': 'Q5NUL3',
-    
-    # Melanocortin
+
+    # Melanin-concentrating hormone
     'MCHR1': 'Q99705',
     'MCHR2': 'Q969V1',
-    
+
     # Neuromedin U
     'NMUR1': 'Q9HB89',
     'NMUR2': 'Q9GZQ4',
-    
+
     # Prostaglandin receptors
     'PE2R2': 'P43116',
     'PE2R3': 'P43115',
     'PE2R4': 'P35408',
     'PF2R': 'P43088',
-    
+
     # Purinergic
     'P2Y12': 'Q9H244',
     'P2RY1': 'P47900',
-    
+
     # Orphan GPCRs
     'GP119': 'Q8TDV5',
     'GP139': 'Q6DWJ6',
     'GP174': 'Q9BXC1',
     'GPR3': 'P46089',
-    'GPR6': 'P46093',
+    'GPR6': 'P46095',
     'GPR12': 'P47775',
     'GPR52': 'Q9Y2T5',
-    'GPBAR': 'Q8TDU5',
-    
+    'GPBAR': 'Q8TDU6',
+
     # Other receptors
     'BKRB2': 'P30411',
     'CCR6': 'P51684',
     'KISSR': 'Q969F8',
-    'MRGX1': 'Q96LB1',
-    'MRGX2': 'Q96LB0',
-    'MTLR': 'P48039',
+    'MRGX1': 'Q96LB2',
+    'MRGX2': 'Q96LB1',
+    'MTLR': 'O43193',
     'NK1R': 'P25103',
     'NTR1': 'P30989',
     'PAR1': 'P25116',
-    'PRLHR': 'Q8TCW9',
+    'PRLHR': 'P49683',
     'PTAFR': 'P25105',
     'RXFP1': 'Q9HBX9',
     'SSR2': 'P30874',
-    'SUCR1': 'Q8TE23',
+    'SUCR1': 'Q9BXA5',
     'TAAR1': 'Q96RJ0',
     'V2R': 'P30518',
 }
 
 RECEPTOR_CONFIG = {
     'Gs': [
-       # ("C:/Users/Marvin/Desktop/Compute folder/Gs/5HT4R_7XT8_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/5HT7R_7XTC_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/AA2AR_5G53_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/ADRB3_9IJE_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/CNR1_8K8J_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/EDNRA_8XVI_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/EDNRB_8XVH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/FFAR4_8H4I_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP119_7WCM_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP139_7VUH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GP174_8KH5_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPBAR_9GYO_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR3_8WW2_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR6_8TYW_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR12_7Y3G_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/GPR52_8HMP_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/NK1R_8U26_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/PE2R2_7CX2_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/PE2R4_8GDB_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/RXFP1_7TMW_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/SUCR1_8JPP_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/TAAR1_8W89_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gs/V2R_7DW9_DONE", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gs/5HT7R_7XTC_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/AA2AR_5G53_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/ADRB3_9IJE_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/CNR1_8K8J_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/EDNRA_8XVI_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/EDNRB_8XVH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/FFAR4_8H4I_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP119_7WCM_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP139_7VUH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GP174_8KH5_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPBAR_9GYO_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR3_8WW2_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR6_8TYW_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR12_7Y3G_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/GPR52_8HMP_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/NK1R_8U26_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/PE2R2_7CX2_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/PE2R4_8GDB_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/RXFP1_7TMW_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/SUCR1_8JPP_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/TAAR1_8W89_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gs/V2R_7DW9_DONE", "nmi_df.csv", "genetic_mapping.json")
     ],
     'Gi': [
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/AA1R_7LD4_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/AA3R_8X17_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/ADA2A_9CBL_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/CCR6_6WWZ_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/CNR1_9ERX_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/EDNRB_8IY5_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/FFAR1_9K1C_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/FFAR2_9K1D_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/MCHR1_8WWK_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/OPRK_8F7W_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/OPRM_8F7Q_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PE2R4_8GCP_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PTAFR_8XYD_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/5HT4R_7XTA_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/NMUR2_7XK8_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/NTR1_6OS9_PREAPRED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/P2Y12_7XXI_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gi/PE2R3_8GDC_PREPARED", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gi/AA1R_7LD4_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/AA3R_8X17_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/ADA2A_9CBL_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/CCR6_6WWZ_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/CNR1_9ERX_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/EDNRB_8IY5_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/FFAR1_9K1C_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/FFAR2_9K1D_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/MCHR1_8WWK_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/OPRK_8F7W_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/OPRM_8F7Q_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PE2R4_8GCP_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PTAFR_8XYD_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/5HT4R_7XTA_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/NMUR2_7XK8_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/NTR1_6OS9_PREAPRED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/P2Y12_7XXI_PREPARED", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gi/PE2R3_8GDC_PREPARED", "nmi_df.csv", "genetic_mapping.json")
     ],
     'Gq': [
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/5HT2A_8UWL_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/5HT2B_7SRR_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/ADA1A_8THL_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/BKRB2_7F6I_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/EDNRA_8HCQ_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/EDNRB_8HCX_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/FFAR4_8G59_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/HRH2_8YN4_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/KISSR_8XGS_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MCHR2_8WST_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MRGX1_8JGF_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MRGX2_7S8L_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/MTLR_8IBV_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/NMUR1_7W56_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/NMUR2_7W55_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/P2RY1_7XXH_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PAR1_8XOR_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PF2R_8IUK_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/PRLHR_8ZPT_DONE", "nmi_df.csv", "genetic_mapping.json"),
-        ("C:/Users/Marvin/Desktop/Compute folder/Gq/SSR2_7Y27_DONE", "nmi_df.csv", "genetic_mapping.json")
+        ("./Gq/5HT2A_8UWL_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/5HT2B_7SRR_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/ADA1A_8THL_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/BKRB2_7F6I_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/EDNRA_8HCQ_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/EDNRB_8HCX_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/FFAR4_8G59_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/HRH2_8YN4_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/KISSR_8XGS_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MCHR2_8WST_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MRGX1_8JGF_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MRGX2_7S8L_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/MTLR_8IBV_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/NMUR1_7W56_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/NMUR2_7W55_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/P2RY1_7XXH_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PAR1_8XOR_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PF2R_8IUK_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/PRLHR_8ZPT_DONE", "nmi_df.csv", "genetic_mapping.json"),
+        ("./Gq/SSR2_7Y27_DONE", "nmi_df.csv", "genetic_mapping.json")
     ]
 }
 
@@ -341,17 +323,17 @@ completed = 0
 for i in range(n_receptors):
     for j in range(i+1, n_receptors):
         rec1, rec2 = receptor_list[i], receptor_list[j]
-        
+
         # Calculate sequence identity
         identity = calculate_sequence_identity(sequences[rec1], sequences[rec2])
-        
+
         # Convert identity to distance (0 = identical, 1 = completely different)
         distance = 1.0 - identity
-        
+
         # Fill symmetric matrix
         sequence_distance_matrix[i, j] = distance
         sequence_distance_matrix[j, i] = distance
-        
+
         completed += 1
         if completed % 100 == 0:
             print(f"  Progress: {completed}/{total_pairs} pairs ({completed/total_pairs*100:.1f}%)")
@@ -379,16 +361,16 @@ for i in range(n_receptors):
     for j in range(i+1, n_receptors):
         rec1, rec2 = receptor_list[i], receptor_list[j]
         distance = calculate_patristic_distance(nj_tree, rec1, rec2)
-        
+
         if distance is not None:
             patristic_distance_matrix[i, j] = distance
             patristic_distance_matrix[j, i] = distance
 
-patristic_df = pd.DataFrame(patristic_distance_matrix, 
-                            index=receptor_list, 
+patristic_df = pd.DataFrame(patristic_distance_matrix,
+                            index=receptor_list,
                             columns=receptor_list)
 patristic_df.to_csv('patristic_distances.csv')
-print("\nPatristic distances saved to: patristic_distances.csv")#
+print("\nPatristic distances saved to: patristic_distances.csv")
 
 
 systems_data = {}
@@ -408,10 +390,6 @@ for coupling, receptors in RECEPTOR_CONFIG.items():
             print(f"  ✗ {receptor_name}: {e}")
 
 # Build feature matrix
-all_bw_keys = set()
-for data in systems_data.values():
-    all_bw_keys.update(data['bw_pairs'].keys())
-
 pair_counts = defaultdict(int)
 for data in systems_data.values():
     for key in data['bw_pairs'].keys():
@@ -454,7 +432,6 @@ common_receptors = sorted(phylo_receptors & mi_receptors)
 # Create aligned matrices for common receptors
 # Map receptor to index in each matrix
 phylo_receptor_to_idx = {rec: i for i, rec in enumerate(receptor_list)}
-mi_receptor_to_idx = {rec: i for i, rec in enumerate(receptor_names)}
 
 common_phylo_indices = []
 common_mi_indices = []
@@ -494,14 +471,14 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
 # 1. Dendrogram - Phylogenetic
 phylo_linkage = linkage(squareform(phylo_dist_aligned), method='average')
-dendrogram(phylo_linkage, labels=common_receptors, leaf_rotation=90, 
+dendrogram(phylo_linkage, labels=common_receptors, leaf_rotation=90,
           leaf_font_size=6, ax=ax1, color_threshold=0)
 ax1.set_title('Phylogenetic Clustering\n(Sequence-based)', fontsize=12, fontweight='bold')
 ax1.set_ylabel('Patristic Distance')
 
 # 2. Dendrogram - MDPATH
 mi_linkage = linkage(squareform(mi_dist_aligned), method='ward')
-dendrogram(mi_linkage, labels=common_receptors, leaf_rotation=90, 
+dendrogram(mi_linkage, labels=common_receptors, leaf_rotation=90,
           leaf_font_size=6, ax=ax2, color_threshold=0)
 ax2.set_title('MDPath based clustering', fontsize=12, fontweight='bold')
 ax2.set_ylabel('MI Distance')
@@ -532,13 +509,13 @@ family_results = []
 for family_name, members in known_families.items():
     # Find members in common receptors
     present_members = [m for m in members if m in common_receptors]
-    
+
     if len(present_members) < 2:
         continue
-    
+
     # Get indices
     member_indices = [common_receptors.index(m) for m in present_members]
-    
+
     # Within-family distances
     within_phylo = []
     within_mi = []
@@ -547,7 +524,7 @@ for family_name, members in known_families.items():
             idx_i, idx_j = member_indices[i], member_indices[j]
             within_phylo.append(phylo_dist_aligned[idx_i, idx_j])
             within_mi.append(mi_dist_aligned[idx_i, idx_j])
-    
+
     # Between-family distances
     other_indices = [i for i in range(n_common) if i not in member_indices]
     between_phylo = []
@@ -556,19 +533,19 @@ for family_name, members in known_families.items():
         for j in other_indices:
             between_phylo.append(phylo_dist_aligned[i, j])
             between_mi.append(mi_dist_aligned[i, j])
-    
+
     within_phylo_mean = np.mean(within_phylo)
     within_mi_mean = np.mean(within_mi)
     between_mi_mean = np.mean(between_mi)
-    
+
     ratio = within_mi_mean / between_mi_mean
-    
+
     # Statistical test
     if len(within_mi) > 0 and len(between_mi) > 0:
         u_stat, u_p = mannwhitneyu(within_mi, between_mi, alternative='less')
     else:
         u_stat, u_p = np.nan, np.nan
-    
+
     family_results.append({
         'Family': family_name,
         'Members': ', '.join(present_members),
@@ -579,7 +556,7 @@ for family_name, members in known_families.items():
         'Ratio': ratio,
         'P_value': u_p
     })
-    
+
     print(f"\n{family_name} ({len(present_members)} members): {', '.join(present_members)}")
     print(f"  Evolutionary distance: {within_phylo_mean:.3f}")
     print(f"  MI distance (within): {within_mi_mean:.3f}")
@@ -595,7 +572,142 @@ family_df.to_csv('phylogenetic_family_clustering_results.csv', index=False)
 print("\n\nDetailed results saved: phylogenetic_family_clustering_results.csv")
 
 
-# A
+#Receptor-level permutation tests
+N_PERM, N_DRAW = 9999, 99999
+rng = np.random.default_rng(0)
+p_ge = lambda null, obs: (1 + np.sum(null >= obs)) / (1 + len(null))
+p_le = lambda null, obs: (1 + np.sum(null <= obs)) / (1 + len(null))
+
+
+def holm(p):
+    """Holm-adjusted p-values."""
+    p = np.asarray(p, float); order = np.argsort(p)
+    adj = np.minimum(np.maximum.accumulate((len(p) - np.arange(len(p))) * p[order]), 1)
+    out = np.empty_like(adj); out[order] = adj
+    return out
+
+
+#Mantel test, receptor labels of the pathway-distance matrix permuted
+iu = np.triu_indices(n_common, k=1)
+mantel_null = np.array([[f(phylo_dists, mi_dist_aligned[np.ix_(q, q)][iu])[0] for f in (spearmanr, pearsonr)]
+                        for q in (rng.permutation(n_common) for _ in range(N_PERM))])
+mantel_p, mantel_p_pearson = p_ge(np.abs(mantel_null[:, 0]), abs(spearman_r)), p_ge(np.abs(mantel_null[:, 1]), abs(pearson_r))
+print(f"\nMantel test ({N_PERM} permutations): Spearman r = {spearman_r:.3f}, p = {mantel_p:.4f}; "
+      f"Pearson r = {pearson_r:.3f}, p = {mantel_p_pearson:.4f}")
+
+
+#Family clustering, exact permutation test with Holm correction
+def family_ratio(idx, D=mi_dist_aligned):
+    """Within-family / member-to-others mean pathway distance."""
+    rest = np.setdiff1d(np.arange(n_common), idx)
+    return D[np.ix_(idx, idx)][np.triu_indices(len(idx), 1)].mean() / D[np.ix_(idx, rest)].mean()
+
+
+_null = {}
+def family_null(n, D=mi_dist_aligned):
+    """Exact null: ratios of all receptor sets of size n."""
+    if (n, id(D)) not in _null:
+        _null[(n, id(D))] = np.array([family_ratio(np.array(c), D) for c in combinations(range(n_common), n)])
+    return _null[(n, id(D))]
+
+
+for res in family_results:
+    idx = np.array([common_receptors.index(m) for m in res['Members'].split(', ')])
+    res['P_perm'] = np.mean(family_null(len(idx)) <= res['Ratio'] * (1 + 1e-12))
+p_mwu, p_perm = [r['P_value'] for r in family_results], [r['P_perm'] for r in family_results]
+for r, a, b, c, d in zip(family_results, holm(p_mwu), false_discovery_control(p_mwu), holm(p_perm), false_discovery_control(p_perm)):
+    r.update(P_value_holm=a, P_value_bh=b, P_perm_holm=c, P_perm_bh=d)
+family_stats = pd.DataFrame(family_results).sort_values('Ratio')
+family_stats.to_csv('phylogenetic_family_statistics.csv', index=False)
+print(family_stats[['Family', 'N', 'Ratio', 'P_value', 'P_value_holm', 'P_perm', 'P_perm_holm', 'P_perm_bh']].round(4).to_string(index=False))
+
+#Pathway distances: same receptor with different G protein vs pseudo-receptors
+R, Gp = np.array(receptor_names), np.array(coupling_labels)
+pairs = list(combinations(range(len(R)), 2))
+d = np.array([mi_dist_matrix[a, b] for a, b in pairs])
+same_r, same_g = np.array([R[a] == R[b] for a, b in pairs]), np.array([Gp[a] == Gp[b] for a, b in pairs])
+category = np.where(same_r, 'same receptor, different G protein',
+                    np.where(same_g, 'different receptor, same G protein', 'different receptor, different G protein'))
+multi = [np.flatnonzero(R == r) for r in pd.unique(R) if (R == r).sum() > 1]
+
+
+def pseudo_receptor_mean():
+    """Mean distance of pseudo-receptors: complexes of different receptors with the same G-protein combinations."""
+    while True:
+        sets = [[rng.choice(np.flatnonzero(Gp == Gp[i])) for i in m] for m in multi]
+        flat = [i for s in sets for i in s]
+        if len(set(flat)) == len(flat) and all(len(set(R[s])) == len(s) for s in sets):
+            return np.mean([mi_dist_matrix[a, b] for s in sets for a, b in combinations(s, 2)])
+
+
+sr_obs, sg_mean = d[same_r].mean(), d[category == 'different receptor, same G protein'].mean()
+null_sr = np.array([pseudo_receptor_mean() for _ in range(N_DRAW)])
+p_sr = p_le(null_sr, sr_obs)
+pd.DataFrame([dict(test='Mantel, Spearman (patristic vs pathway distance)', observed=spearman_r, p_permutation=mantel_p,
+                   p_parametric_original=spearman_p, null_mean=mantel_null[:, 0].mean(), n_permutations=N_PERM),
+              dict(test='Mantel, Pearson (patristic vs pathway distance)', observed=pearson_r, p_permutation=mantel_p_pearson,
+                   p_parametric_original=pearson_p, null_mean=mantel_null[:, 1].mean(), n_permutations=N_PERM),
+              dict(test='Mean pathway distance, same receptor with different G proteins vs pseudo-receptors',
+                   observed=sr_obs, p_permutation=p_sr, null_mean=null_sr.mean(), n_permutations=N_DRAW)]
+             ).to_csv('phylogenetic_permutation_tests.csv', index=False)
+pd.DataFrame([dict(category=c, n_pairs=int((category == c).sum()), mean_distance=d[category == c].mean(),
+                   median_distance=np.median(d[category == c])) for c in pd.unique(category)]
+             ).to_csv('receptor_vs_gprotein_summary.csv', index=False)
+pair_rows = []
+for (a, b), dist in zip(np.array(pairs)[same_r], d[same_r]):
+    ref = d[~same_r & np.array([{Gp[x], Gp[y]} == {Gp[a], Gp[b]} for x, y in pairs])]
+    pair_rows.append(dict(receptor=R[a], complexes=f"{sample_names[a]} / {sample_names[b]}", g_proteins=f"{Gp[a]}/{Gp[b]}",
+                          pathway_distance=dist, percentile_among_different_receptors=100 * np.mean(ref <= dist),
+                          n_reference_pairs=len(ref)))
+pd.DataFrame(pair_rows).to_csv('receptor_vs_gprotein_pairs.csv', index=False)
+print(f"\nSame receptor, different G protein: mean distance {sr_obs:.1f} ({same_r.sum()} pairs); different receptor, "
+      f"same G protein: {sg_mean:.1f}; pseudo-receptor null mean {null_sr.mean():.1f}, p = {p_sr:.4f}")
+print(pd.DataFrame(pair_rows).round(2).to_string(index=False))
+
+#Sensitivity: pathway distances averaged over complexes, receptors weighted equally, one receptor left out
+members = {r: np.flatnonzero(R == r) for r in common_receptors}
+mi_mean = np.array([[mi_dist_matrix[np.ix_(members[a], members[b])].mean() * (a != b) for b in common_receptors]
+                    for a in common_receptors])
+r_mean = spearmanr(phylo_dists, mi_mean[iu])[0]
+null_mean = np.array([spearmanr(phylo_dists, mi_mean[np.ix_(q, q)][iu])[0] for q in (rng.permutation(n_common) for _ in range(N_PERM))])
+sens = [dict(analysis='Mantel, Spearman, receptor-mean pathway distance', item='53 receptors', statistic=r_mean,
+             p_permutation=p_ge(np.abs(null_mean), abs(r_mean)))]
+fam = []
+for res in family_results:
+    idx = np.array([common_receptors.index(m) for m in res['Members'].split(', ')])
+    obs = family_ratio(idx, mi_mean)
+    fam.append(dict(analysis='Family ratio, receptor-mean pathway distance', item=res['Family'], statistic=obs,
+                    p_permutation=np.mean(family_null(len(idx), mi_mean) <= obs * (1 + 1e-12))))
+for f, h in zip(fam, holm([f['p_permutation'] for f in fam])):
+    f['p_holm'] = h
+sens += fam
+
+
+def pseudo_sets(defs):
+    """As pseudo_receptor_mean, but returning the distances of each pseudo-receptor."""
+    while True:
+        sets = [[rng.choice(np.flatnonzero(Gp == Gp[i])) for i in m] for m in defs]
+        flat = [i for s in sets for i in s]
+        if len(set(flat)) == len(flat) and all(len(set(R[s])) == len(s) for s in sets):
+            return [[mi_dist_matrix[a, b] for a, b in combinations(s, 2)] for s in sets]
+
+
+real = lambda defs: [[mi_dist_matrix[a, b] for a, b in combinations(m, 2)] for m in defs]
+per_receptor = lambda sets: np.mean([np.mean(s) for s in sets])
+pooled = lambda sets: np.mean(np.concatenate(sets))
+obs_w = per_receptor(real(multi))
+sens.append(dict(analysis='Same receptor vs pseudo-receptors, receptors weighted equally', item=f'{len(multi)} receptors',
+                 statistic=obs_w, p_permutation=p_le(np.array([per_receptor(pseudo_sets(multi)) for _ in range(N_DRAW)]), obs_w)))
+for k, m in enumerate(multi):
+    defs = multi[:k] + multi[k + 1:]
+    obs = pooled(real(defs))
+    sens.append(dict(analysis='Same receptor vs pseudo-receptors, one receptor left out', item=f'without {R[m[0]]}',
+                     statistic=obs, p_permutation=p_le(np.array([pooled(pseudo_sets(defs)) for _ in range(N_DRAW)]), obs)))
+pd.DataFrame(sens).to_csv('phylogenetic_sensitivity.csv', index=False)
+print("\nSensitivity analyses:\n" + pd.DataFrame(sens).round(4).to_string(index=False))
+
+
+#Make Figure 2 (A: phylogenetic vs pathway distance, B: family ratios)
 fig = plt.figure(figsize=(10, 4))
 
 
@@ -617,7 +729,7 @@ sc = ax1.scatter(x_sorted, y_sorted, c=density_sorted, s=10, cmap='viridis',
 xi, yi = np.mgrid[phylo_dists.min():phylo_dists.max():100j,
                   mi_dists.min():mi_dists.max():100j]
 zi = gaussian_kde(xy)(np.vstack([xi.flatten(), yi.flatten()])).reshape(xi.shape)
-contours = ax1.contour(xi, yi, zi, levels=5, colors='white', 
+contours = ax1.contour(xi, yi, zi, levels=5, colors='white',
                        linewidths=0.6, alpha=0.7)
 
 cb = plt.colorbar(sc, ax=ax1, pad=0.02, aspect=15)
@@ -632,10 +744,8 @@ ax1.plot(x_line, p(x_line), 'r-', linewidth=1.2, alpha=0.9)
 
 
 r_squared = spearman_r**2
-if spearman_p < 0.001:
-    text_str = f'ρ = {spearman_r:.3f}\nR² = {r_squared:.3f}\np < 0.001'
-else:
-    text_str = f'ρ = {spearman_r:.3f}\nR² = {r_squared:.3f}\np = {spearman_p:.3f}'
+p_txt = f'Mantel p ≤ {mantel_p:.4f}' if mantel_p <= 1 / (N_PERM + 1) else f'Mantel p = {mantel_p:.3f}'
+text_str = f'ρ = {spearman_r:.3f}\nR² = {r_squared:.3f}\n{p_txt}'
 
 ax1.text(0.05, 0.95, text_str, transform=ax1.transAxes,
          fontsize=9, verticalalignment='top',
@@ -650,17 +760,17 @@ ax1.tick_params(labelsize=9)
 ax1.spines['top'].set_visible(False)
 ax1.spines['right'].set_visible(False)
 
-#  B
+# B
 ax2 = plt.subplot(1, 2, 2)
 family_df_sorted = pd.DataFrame(family_results).sort_values('Ratio')
 
 ax2.axvspan(0, 1.0, alpha=0.15, color='#2E7D32', zorder=0)
 
-colors = ['#2E7D32' if p < 0.05 else '#909090' 
-          for p in family_df_sorted['P_value']]
+colors = ['#2E7D32' if p < 0.05 else '#909090'
+          for p in family_df_sorted['P_perm_holm']]
 
 y_pos = np.arange(len(family_df_sorted))
-bars = ax2.barh(y_pos, family_df_sorted['Ratio'], 
+bars = ax2.barh(y_pos, family_df_sorted['Ratio'],
                 color=colors, alpha=0.85, edgecolor='black', linewidth=0.5)
 
 for i, (bar, ratio) in enumerate(zip(bars, family_df_sorted['Ratio'])):
@@ -671,7 +781,7 @@ for i, (bar, ratio) in enumerate(zip(bars, family_df_sorted['Ratio'])):
 ax2.axvline(x=1.0, color='#D32F2F', linestyle='--', linewidth=1.2, alpha=0.9)
 
 ax2.set_yticks(y_pos)
-family_labels = [f"{f} (n={n})" for f, n in 
+family_labels = [f"{f} (n={n})" for f, n in
                  zip(family_df_sorted['Family'], family_df_sorted['N'])]
 ax2.set_yticklabels(family_labels, fontsize=9)
 
@@ -683,10 +793,10 @@ ax2.spines['right'].set_visible(False)
 
 ax2.set_xlim(0, max(family_df_sorted['Ratio']) * 1.18)
 
-sig_patch = mpatches.Patch(color='#2E7D32', label='p < 0.05')
-nonsig_patch = mpatches.Patch(color='#757575', label='p ≥ 0.05')
-ax2.legend(handles=[sig_patch, nonsig_patch], 
-           loc='upper right',
+sig_patch = mpatches.Patch(color='#2E7D32', label='Holm-adjusted p < 0.05')
+nonsig_patch = mpatches.Patch(color='#757575', label='Holm-adjusted p ≥ 0.05')
+ax2.legend(handles=[sig_patch, nonsig_patch],
+           loc='lower right', bbox_to_anchor=(1, 1.0),
            fontsize=8, frameon=True, edgecolor='gray', fancybox=False,
            ncol=1)
 
@@ -696,3 +806,29 @@ plt.tight_layout()
 plt.savefig('figure2_phylogenetic_analysis.png', dpi=300, bbox_inches='tight')
 plt.savefig('figure2_phylogenetic_analysis.pdf', bbox_inches='tight')
 plt.show()
+
+
+#Make figure for SI: pathway distances by receptor / G-protein relation
+C, G = "#2a78d6", "0.3"
+sns.set_theme(style="ticks", context="paper", font_scale=0.9, rc={"axes.spines.right": False, "axes.spines.top": False})
+fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.8), gridspec_kw={'width_ratios': [1.4, 1]})
+order = ['same receptor, different G protein', 'different receptor, same G protein', 'different receptor, different G protein']
+ax = axes[0]
+sns.boxplot(x=category, y=d, order=order, color=C, width=0.5, showfliers=False, boxprops={'alpha': 0.4}, linewidth=0.8, ax=ax)
+sns.stripplot(x=category[~same_r], y=d[~same_r], order=order, color=C, size=1.5, alpha=0.4, jitter=0.2, ax=ax)
+sns.stripplot(x=category[same_r], y=d[same_r], order=order, color="k", size=3, jitter=0.1, ax=ax)
+ax.set_xticks(range(3), [(o[0].upper() + o[1:]).replace(', ', ',\n') + f"\n(n = {(category == o).sum()})" for o in order], fontsize=7)
+ax.set(xlabel="", ylabel="Pathway distance")
+ax.set_title("a  Pairs of complexes", loc="left", fontsize=9)
+ax = axes[1]
+sns.histplot(null_sr, color=C, edgecolor="white", lw=0.4, ax=ax)
+ax.axvline(sr_obs, color="k", lw=1); ax.axvline(sg_mean, color=G, lw=0.8, ls="--")
+ax.text(0.99, 0.97, f"same receptor {sr_obs:.0f}\np = {p_sr:.4f}\ndashed: different\nreceptor, same G {sg_mean:.0f}",
+        transform=ax.transAxes, ha="right", va="top", fontsize=6, color="0.25")
+ax.set(xlabel="Mean distance, pseudo-receptors", ylabel="Permutations")
+ax.set_title("b  Receptor-level null", loc="left", fontsize=9)
+fig.tight_layout()
+fig.savefig('receptor_vs_gprotein_distances.png', dpi=300, bbox_inches="tight")
+fig.savefig('receptor_vs_gprotein_distances.pdf', bbox_inches="tight")
+print("\nSaved: phylogenetic_permutation_tests.csv, phylogenetic_family_statistics.csv, phylogenetic_sensitivity.csv, receptor_vs_gprotein_summary.csv, "
+      "receptor_vs_gprotein_pairs.csv, receptor_vs_gprotein_distances.png/.pdf")
